@@ -1,0 +1,396 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+
+  "Description" : "Simple web app stack",
+  "Parameters" : {
+    "BuildBucket": {
+      "Description" : "S3 Build Bucket Name",
+      "Type" : "String",
+      "Default" : ""
+    },
+
+    "KeyName" : {
+      "Description" : "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "Type" : "AWS::EC2::KeyPair::KeyName",
+      "Default" : "",
+      "ConstraintDescription" : "must be the name of an existing EC2 KeyPair."
+    },
+
+    "SSHLocation" : {
+      "Description" : "Lockdown SSH access to the bastion host (default can be accessed from anywhere)",
+      "Type" : "String",
+      "MinLength": "9",
+      "MaxLength": "18",
+      "Default" : "0.0.0.0/0",
+      "AllowedPattern" : "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+      "ConstraintDescription" : "must be a valid CIDR range of the form x.x.x.x/x."
+    },
+
+    "InstanceType" : {
+      "Description" : "WebServer EC2 instance type",
+      "Type" : "String",
+      "Default" : "t2.small",
+      "AllowedValues" : [ "t1.micro", "t2.nano", "t2.micro", "t2.small", "t2.medium", "t2.large", "m1.small", "m1.medium", "m1.large", "m1.xlarge", "m2.xlarge", "m2.2xlarge", "m2.4xlarge", "m3.medium", "m3.large", "m3.xlarge", "m3.2xlarge", "m4.large", "m4.xlarge", "m4.2xlarge", "m4.4xlarge", "m4.10xlarge", "c1.medium", "c1.xlarge", "c3.large", "c3.xlarge", "c3.2xlarge", "c3.4xlarge", "c3.8xlarge", "c4.large", "c4.xlarge", "c4.2xlarge", "c4.4xlarge", "c4.8xlarge", "g2.2xlarge", "g2.8xlarge", "r3.large", "r3.xlarge", "r3.2xlarge", "r3.4xlarge", "r3.8xlarge", "i2.xlarge", "i2.2xlarge", "i2.4xlarge", "i2.8xlarge", "d2.xlarge", "d2.2xlarge", "d2.4xlarge", "d2.8xlarge", "hi1.4xlarge", "hs1.8xlarge", "cr1.8xlarge", "cc2.8xlarge", "cg1.4xlarge"],
+      "ConstraintDescription" : "must be a valid EC2 instance type."
+    },
+
+    "InstanceCount" : {
+      "Description" : "Number of EC2 instances to launch",
+      "Type" : "Number",
+      "Default" : "1"
+    },
+
+    "InstanceMax" : {
+      "Description" : "Max Number of EC2 instances to launch",
+      "Type" : "Number",
+      "Default" : "10"
+    },
+
+    "ScaleUpCPUThreshold" : {
+      "Description" : "CPU Upper limit to add instances",
+      "Type" : "Number",
+      "Default" : "75"
+    },
+
+    "ScaleDownCPUThreshold" : {
+      "Description" : "CPU Lower limit to scale down instances",
+      "Type" : "Number",
+      "Default" : "30"
+    },
+
+    "HostDomain" : {
+      "Description" : "Domain name to assign ELB",
+      "Type" : "String",
+      "Default" : ""
+    },
+
+    "HostName" : {
+      "Description" : "Hostname to assign ELB",
+      "Type" : "String",
+      "Default" : ""
+    }
+  },
+
+  "Mappings" : {
+  },
+  "Conditions" : {
+    "CreateDnsRecord" : { "Fn::Not": [ {"Fn::Equals" : [{"Ref" : "HostDomain"}, ""]} ] }
+  },
+  "Resources" : {
+
+    "appVpc": {
+      "Type": "AWS::CloudFormation::Stack",
+      "Properties" : {
+        "TemplateURL": { "Fn::Join": [ "", [ "https://", { "Ref": "BuildBucket"}, ".s3.amazonaws.com/vpc.json" ] ] },
+        "Parameters": {
+        }
+      }
+    },
+    "ImageLookup": {
+      "Type": "AWS::CloudFormation::Stack",
+      "Properties" : {
+        "TemplateURL": { "Fn::Join": [ "", [ "https://", { "Ref": "BuildBucket"}, ".s3.amazonaws.com/amilookup.json" ] ] },
+        "Parameters": {
+          "InstanceType": { "Ref": "InstanceType"},
+          "S3Bucket" : { "Ref" : "BuildBucket"},
+          "S3Key" : "amilookup.zip"
+        }
+      }
+    },
+    "loggingBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": { "Fn::Join": [ "-", [ { "Ref":"AWS::StackName"}, "logging" ] ] }
+        }
+    },
+
+    "WebServerGroup" : {
+      "Type" : "AWS::AutoScaling::AutoScalingGroup",
+      "Properties" : {
+        "VPCZoneIdentifier" : [ { "Fn::GetAtt": [ "appVpc", "Outputs.subnetId" ] } ],
+        "LaunchConfigurationName" : { "Ref" : "LaunchConfig" },
+        "MinSize" : { "Ref" : "InstanceCount" },
+        "MaxSize" : { "Ref" : "InstanceMax" },
+        "DesiredCapacity" : { "Ref" : "InstanceCount" },
+        "LoadBalancerNames" : [ { "Ref" : "ElasticLoadBalancer" } ],
+        "Tags" : [ {
+           "Key" : "Name",
+           "Value" : { "Ref": "HostName"},
+           "PropagateAtLaunch" : "true"
+         } ]
+      },
+      "CreationPolicy" : {
+        "ResourceSignal" : {
+          "Timeout" : "PT15M"
+        }
+      },
+      "UpdatePolicy": {
+        "AutoScalingRollingUpdate": {
+          "MinInstancesInService": "1",
+          "MaxBatchSize": "1",
+          "PauseTime" : "PT15M",
+          "WaitOnResourceSignals": "true"
+        }
+      }
+    },
+
+    "LaunchConfig" : {
+      "Type" : "AWS::AutoScaling::LaunchConfiguration",
+      "Metadata" : {
+        "Comment" : "My Application",
+        "AWS::CloudFormation::Init" : {
+          "configSets" : {
+            "InstallAndRun" : [ "config" ]
+          },
+
+          "config" : {
+            "packages" : {
+              "yum" : {
+                "httpd": []
+              }
+            },
+            "files" : {
+              "/etc/cfn/cfn-hup.conf" : {
+                "content" : { "Fn::Join" : ["", [
+                  "[main]\n",
+                  "stack=", { "Ref" : "AWS::StackId" }, "\n",
+                  "region=", { "Ref" : "AWS::Region" }, "\n"
+                ]]},
+                "mode"    : "000400",
+                "owner"   : "root",
+                "group"   : "root"
+              },
+              "/var/www/html/index.html": {
+                "content": { "Fn::Join" : ["", [
+                  "<html><head><title>Demo App</title></head\n",
+                  "<body><h1>Automation for the People</h1>\n",
+                  "</body></html>\n"
+                ]]},
+                "mode"    : "000440",
+                "owner"   : "apache",
+                "group"   : "apache"
+              },
+
+              "/etc/cfn/hooks.d/cfn-auto-reloader.conf" : {
+                "content": { "Fn::Join" : ["", [
+                  "[cfn-auto-reloader-hook]\n",
+                  "triggers=post.update\n",
+                  "path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init\n",
+                  "action=/opt/aws/bin/cfn-init -v ",
+                  "         --stack ", { "Ref" : "AWS::StackName" },
+                  "         --resource LaunchConfig ",
+                  "         --region ", { "Ref" : "AWS::Region" }, "\n",
+                  "runas=root\n"
+                ]]}
+              }
+            },
+
+            "services" : {
+              "sysvinit" : {
+                "httpd" : { "enabled" : "true", "ensureRunning" : "true" },
+                "cfn-hup" : {
+                  "enabled" : "true", "ensureRunning" : "true",
+                  "files" : [ "/etc/cfn/cfn-hup.conf", "/etc/cfn/hooks.d/cfn-auto-reloader.conf" ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "Properties" : {
+        "AssociatePublicIpAddress" : "true",
+        "ImageId"        :  { "Fn::GetAtt" : [ "ImageLookup", "Outputs.amiId" ] },
+        "SecurityGroups" : [ { "Ref" : "InstanceSecurityGroup" } ],
+        "KeyName"        : { "Ref" : "KeyName" },
+        "InstanceType"   : { "Ref" : "InstanceType" },
+        "UserData"       : { "Fn::Base64" : { "Fn::Join" : ["", [
+          "#!/bin/bash -xe\n",
+          "yum update -y aws-cfn-bootstrap\n",
+
+          "/opt/aws/bin/cfn-init -v ",
+          "         --stack ", { "Ref" : "AWS::StackName" },
+          "         --resource LaunchConfig ",
+          "         --configsets InstallAndRun",
+          "         --region ", { "Ref" : "AWS::Region" }, "\n",
+
+          "/opt/aws/bin/cfn-signal -e $? ",
+          "         --stack ", { "Ref" : "AWS::StackName" },
+          "         --resource WebServerGroup ",
+          "         --region ", { "Ref" : "AWS::Region" }, "\n"
+        ]]}}
+      }
+    },
+
+    "S3LoggingBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "loggingBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2008-10-17",
+          "Statement": [ {
+            "Sid": "ELBAccessLogs20160202",
+            "Effect": "Allow",
+            "Resource": {
+              "Fn::Join": [
+                "",
+                [
+                  "arn:aws:s3:::",
+                  { "Ref": "loggingBucket" },
+                  "/",
+                  "Logs",
+                  "/AWSLogs/",
+                  { "Ref": "AWS::AccountId" },
+                  "/*"
+                ]
+              ]
+            },
+            "Principal": "*",
+            "Action": [
+              "s3:PutObject"
+            ]
+          } ]
+        }
+      }
+    },
+
+    "ElasticLoadBalancer" : {
+      "Type" : "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties" : {
+        "CrossZone" : "true",
+        "SecurityGroups" : [ { "Ref" : "LoadBalancerSecurityGroup" } ],
+        "Subnets" :[ { "Fn::GetAtt": [ "appVpc", "Outputs.subnetId" ] } ],
+        "Listeners" : [ {
+          "LoadBalancerPort" : "80",
+          "InstancePort" : "80",
+          "Protocol" : "HTTP"
+        } ],
+        "HealthCheck" : {
+          "Target" : "HTTP:80/",
+          "HealthyThreshold" : "2",
+          "UnhealthyThreshold" : "4",
+          "Interval" : "30",
+          "Timeout" : "15"
+        },
+        "AccessLoggingPolicy": {
+          "S3BucketName": { "Ref": "loggingBucket" },
+          "S3BucketPrefix": "Logs",
+          "Enabled": "true",
+          "EmitInterval" : "60"
+        }
+      }
+    },
+
+    "ServerScaleUpPolicy": {
+      "Type": "AWS::AutoScaling::ScalingPolicy",
+      "Properties": {
+        "AdjustmentType": "ChangeInCapacity",
+        "AutoScalingGroupName": { "Ref": "WebServerGroup" },
+        "Cooldown": "60",
+        "ScalingAdjustment": "1"
+      }
+    },
+    "ServerScaleDownPolicy": {
+      "Type": "AWS::AutoScaling::ScalingPolicy",
+      "Properties": {
+        "AdjustmentType": "ChangeInCapacity",
+        "AutoScalingGroupName": { "Ref": "WebServerGroup" },
+        "Cooldown": "60",
+        "ScalingAdjustment": "-1"
+      }
+    },
+    "CPUAlarmHigh": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Scale-up if CPU > high limit for 2 minutes",
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": "60",
+        "EvaluationPeriods": "2",
+        "Threshold": { "Ref" : "ScaleUpCPUThreshold" },
+        "AlarmActions": [ { "Ref": "ServerScaleUpPolicy" } ],
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": { "Ref": "WebServerGroup" }
+          }
+        ],
+        "ComparisonOperator": "GreaterThanThreshold"
+      }
+    },
+    "CPUAlarmLow": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "Scale-down if CPU < low limit for 10 minutes",
+        "MetricName": "CPUUtilization",
+        "Namespace": "AWS/EC2",
+        "Statistic": "Average",
+        "Period": "60",
+        "EvaluationPeriods": "10",
+        "Threshold": { "Ref" : "ScaleDownCPUThreshold" },
+        "AlarmActions": [ { "Ref": "ServerScaleDownPolicy" } ],
+        "Dimensions": [
+          {
+            "Name": "AutoScalingGroupName",
+            "Value": { "Ref": "WebServerGroup" }
+          }
+        ],
+        "ComparisonOperator": "LessThanThreshold"
+      }
+    },
+    "LoadBalancerSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable HTTP access on port 80",
+        "VpcId" : { "Fn::GetAtt": [ "appVpc", "Outputs.vpcId" ] },
+        "SecurityGroupIngress" : [ {
+          "IpProtocol" : "tcp",
+          "FromPort" : "80",
+          "ToPort" : "80",
+          "CidrIp" : "0.0.0.0/0"
+        } ],
+        "SecurityGroupEgress" : [ {
+          "IpProtocol" : "tcp",
+          "FromPort" : "80",
+          "ToPort" : "80",
+          "CidrIp" : "0.0.0.0/0"
+        } ]
+      }
+    },
+
+    "InstanceSecurityGroup" : {
+      "Type" : "AWS::EC2::SecurityGroup",
+      "Properties" : {
+        "GroupDescription" : "Enable HTTP access and SSH access",
+        "VpcId" : { "Fn::GetAtt": [ "appVpc", "Outputs.vpcId" ] },
+        "SecurityGroupIngress" : [
+          { "IpProtocol" : "tcp", "FromPort" : "80", "ToPort" : "80", "SourceSecurityGroupId" : { "Ref" : "LoadBalancerSecurityGroup" } },
+          { "IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : { "Ref" : "SSHLocation" } }
+        ]
+      }
+    },
+    "route53entry" : {
+      "Type" : "AWS::Route53::RecordSet",
+      "Condition": "CreateDnsRecord",
+      "Properties" : {
+        "HostedZoneName" : { "Fn::Join" : [ "", [  { "Ref" : "HostDomain"}, "." ] ] },
+        "Name" : { "Fn::Join" : [ ".", [ {"Ref" : "HostName"}, { "Ref" : "HostDomain"}] ] },
+        "Type" : "CNAME",
+        "TTL" : "60",
+        "ResourceRecords" : [ { "Fn::GetAtt" : [ "ElasticLoadBalancer", "DNSName" ] } ]
+      }
+    }
+  },
+  "Outputs" : {
+    "URL" : {
+      "Description" : "URL of the website",
+      "Value" :  { "Fn::Join" : [ "", [ "http://", { "Fn::GetAtt" : [ "ElasticLoadBalancer", "DNSName" ] } ] ] }
+    },
+    "FriendlyURL" : {
+      "Description" : "Friendly URL of ELB",
+      "Value" : { "Fn::Join" : [ ".", [ { "Ref" : "HostName"}, { "Ref" : "HostDomain"} ] ] }
+    }
+  }
+}
