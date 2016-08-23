@@ -11,6 +11,7 @@ This script assumes the aws cli utility is installed and configured.
 
 ## Running the Demo
 Usage: ./deploy.sh BUCKETNAME [HOSTNAME DOMAIN]
+
 Example: ./deploy.sh devops-deploy-bucket demo domain.com
 
 BUCKETNAME is the name of the build bucket to use during the deployment
